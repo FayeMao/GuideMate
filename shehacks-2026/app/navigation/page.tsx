@@ -27,14 +27,13 @@ interface NodeData {
 
 interface Edge {
   to: string;
-  say: string;
+  say: string; // directions only, no landmark-confirmed wording
 }
 
 export default function NavigationPage() {
   const statusElRef = useRef<HTMLDivElement>(null);
-  const sceneContainerRef = useRef<HTMLDivElement>(null);
   const [status, setStatus] = useState('Loading AR libraries...');
-  const [destination, setDestination] = useState('two');
+  const [destination, setDestination] = useState('exitdoor');
   const [scriptsLoaded, setScriptsLoaded] = useState(false);
 
   // Load scripts dynamically
@@ -45,12 +44,10 @@ export default function NavigationPage() {
       return;
     }
 
-    // Check if scripts are already in the document
     const existingAframe = document.querySelector('script[src*="aframe"]');
     const existingMindar = document.querySelector('script[src*="mind-ar"]');
 
     if (existingAframe && existingMindar) {
-      // Scripts are loading, wait for them
       const checkInterval = setInterval(() => {
         if (window.AFRAME && window.MINDAR) {
           setScriptsLoaded(true);
@@ -69,7 +66,6 @@ export default function NavigationPage() {
       }
     };
 
-    // Load A-Frame
     const aframeScript = document.createElement('script');
     aframeScript.src = 'https://aframe.io/releases/1.5.0/aframe.min.js';
     aframeScript.async = false;
@@ -82,9 +78,9 @@ export default function NavigationPage() {
     };
     document.head.appendChild(aframeScript);
 
-    // Load MindAR after A-Frame
     const mindarScript = document.createElement('script');
-    mindarScript.src = 'https://cdn.jsdelivr.net/npm/mind-ar@1.2.5/dist/mindar-image-aframe.prod.js';
+    mindarScript.src =
+      'https://cdn.jsdelivr.net/npm/mind-ar@1.2.5/dist/mindar-image-aframe.prod.js';
     mindarScript.async = false;
     mindarScript.onload = () => {
       mindarLoaded = true;
@@ -103,37 +99,40 @@ export default function NavigationPage() {
     const statusEl = statusElRef.current;
     if (!statusEl) return;
 
+    // New node ids and labels
     const nodes: Record<string, NodeData> = {
-      two: { label: '2 sign' },
+      elevator: { label: 'Elevator' }, // acts like old "2 sign"
       washroom: { label: 'Washroom' },
-      couch: { label: 'Couch' },
-      painting: { label: 'Painting' },
-      caution: { label: 'Caution sign' },
-      door: { label: 'Door' },
+      mainhall: { label: 'Main hall' }, // acts like old "caution sign"
+      exitdoor: { label: 'Exit door' },
     };
 
+    // Your new checkpoint order
     const indexToNode: Record<number, string> = {
-      0: 'two',
+      0: 'elevator',
       1: 'washroom',
-      2: 'couch',
-      3: 'painting',
-      4: 'caution',
-      5: 'door',
+      2: 'mainhall',
+      3: 'exitdoor',
     };
 
-    const ACTIVE_NODES = new Set(['two', 'washroom', 'caution', 'door']);
+    const ACTIVE_NODES = new Set(['elevator', 'washroom', 'mainhall', 'exitdoor']);
 
+    // Directions only (no "landmark confirmed", no "until you reach")
     const edges: Record<string, Edge[]> = {
-      two: [{ to: 'washroom', say: 'Landmark confirmed: 2 sign. Take a right to reach the washroom.' }],
+      elevator: [
+        { to: 'washroom', say: 'Go right and walk straight.' },
+      ],
       washroom: [
-        { to: 'caution', say: 'Landmark confirmed: washroom. Go straight to reach the caution sign.' },
-        { to: 'two', say: 'Landmark confirmed: washroom. Go straight to reach the 2 sign.' },
+        { to: 'mainhall', say: 'Walk straight.' },
+        { to: 'elevator', say: 'Walk straight.' },
       ],
-      caution: [
-        { to: 'door', say: 'Landmark confirmed: caution sign. Take a right to reach the door.' },
-        { to: 'washroom', say: 'Landmark confirmed: caution sign. Take a left to reach the washroom.' },
+      mainhall: [
+        { to: 'exitdoor', say: 'Go right and walk straight.' },
+        { to: 'washroom', say: 'Go left and walk straight.' },
       ],
-      door: [{ to: 'caution', say: 'Landmark confirmed: door. Turn around, then go straight to reach the caution sign.' }],
+      exitdoor: [
+        { to: 'mainhall', say: 'Do a 180, then walk straight.' },
+      ],
     };
 
     function bfsPath(start: string, goal: string): string[] | null {
@@ -222,7 +221,7 @@ export default function NavigationPage() {
       pathStep = 0;
       segmentPrompted = false;
       lastConfirmedAt = 0;
-      speak('Pick a destination, then scan any landmark to start.', { interrupt: true });
+      speak('Pick a destination, then scan a landmark to start.', { interrupt: true });
     }
 
     function setDestinationHandler(newDest: string) {
@@ -232,25 +231,31 @@ export default function NavigationPage() {
       pathStep = 0;
       segmentPrompted = false;
       lastConfirmedAt = 0;
-      speak(`Destination set to ${nodes[destinationNode].label}. Scan any landmark to start.`, { interrupt: true });
+      speak(`Destination set to ${nodes[destinationNode].label}. Scan a landmark to start.`, {
+        interrupt: true,
+      });
     }
 
     function getEdgeInstruction(from: string, to: string): string {
       const e = (edges[from] || []).find((x) => x.to === to);
-      return e ? e.say : 'Landmark confirmed. Continue forward carefully and scan again.';
+      return e ? e.say : 'Keep moving forward with caution.';
     }
 
     function announceNextInstruction() {
-      if (!path) return;
+      if (!path || !currentNode) return;
 
       if (pathStep >= path.length - 1) {
-        speak('You have arrived.', { interrupt: true });
+        speak(`You have arrived at ${nodes[destinationNode].label}.`, { interrupt: true });
         return;
       }
 
       const from = path[pathStep];
       const to = path[pathStep + 1];
-      speak(getEdgeInstruction(from, to), { interrupt: true });
+
+      const direction = getEdgeInstruction(from, to);
+
+      // Always start with "You are at X"
+      speak(`You are at ${nodes[from].label}. ${direction}`, { interrupt: true });
     }
 
     const stableMs = 500;
@@ -277,8 +282,11 @@ export default function NavigationPage() {
       const now = Date.now();
       if (now - lastConfirmedAt < movementPromptDelayMs) return;
 
+      // Do not stack prompts while already talking
+      if (window.speechSynthesis.speaking) return;
+
       segmentPrompted = true;
-      speak('Keep moving forward carefully.', { interrupt: false });
+      speak('Keep moving forward with caution.', { interrupt: false });
     }
 
     const movementPromptInterval = setInterval(maybeGiveMovementPrompt, 700);
@@ -295,17 +303,12 @@ export default function NavigationPage() {
         return;
       }
 
-      speak(`Starting at ${nodes[currentNode].label}.`, { interrupt: true });
-      setTimeout(announceNextInstruction, 350);
+      announceNextInstruction();
     }
 
     function onNodeConfirmed(nodeId: string) {
-      if (!ACTIVE_NODES.has(nodeId)) {
-        console.log('IGNORED', nodeId);
-        return;
-      }
+      if (!ACTIVE_NODES.has(nodeId)) return;
 
-      window.speechSynthesis.cancel();
       lastConfirmedAt = Date.now();
       segmentPrompted = false;
 
@@ -317,6 +320,7 @@ export default function NavigationPage() {
         return;
       }
 
+      // Advance if expected next node
       if (pathStep < path.length - 1) {
         const expectedNext = path[pathStep + 1];
         if (nodeId === expectedNext) {
@@ -327,6 +331,7 @@ export default function NavigationPage() {
         }
       }
 
+      // If user scanned a different node, reroute
       if (nodeId !== currentNode) {
         currentNode = nodeId;
         path = bfsPath(currentNode, destinationNode);
@@ -337,7 +342,8 @@ export default function NavigationPage() {
           return;
         }
 
-        speak(`Re routing from ${nodes[currentNode].label}.`, { interrupt: true });
+        // Keep your wording consistent
+        speak(`You are at ${nodes[currentNode].label}. Re routing.`, { interrupt: true });
         setTimeout(announceNextInstruction, 350);
         return;
       }
@@ -348,13 +354,11 @@ export default function NavigationPage() {
     function onTargetFound(targetIndex: number) {
       const nodeId = indexToNode[targetIndex];
       if (!nodeId) return;
-      console.log('FOUND', targetIndex, nodeId);
 
       if (!acceptStable(nodeId)) return;
       onNodeConfirmed(nodeId);
     }
 
-    // Set up event handlers
     function handleRepeat() {
       if (lastSpoken) speak(lastSpoken, { interrupt: true });
     }
@@ -368,13 +372,13 @@ export default function NavigationPage() {
       setDestinationHandler(target.value);
     }
 
+    // Only 4 targets now
     const targetFoundHandlers: (() => void)[] = [];
-    for (let i = 0; i < 6; i++) {
+    for (let i = 0; i < 4; i++) {
       const handler = () => onTargetFound(i);
       targetFoundHandlers.push(handler);
     }
 
-    // Wait a bit for scene to be in DOM before setting up event listeners
     const setupTimeout = setTimeout(() => {
       const resetBtn = document.getElementById('resetBtn');
       const repeatBtn = document.getElementById('repeatBtn');
@@ -384,7 +388,7 @@ export default function NavigationPage() {
       if (repeatBtn) repeatBtn.addEventListener('click', handleRepeat);
       if (destEl) destEl.addEventListener('change', handleDestinationChange);
 
-      for (let i = 0; i < 6; i++) {
+      for (let i = 0; i < 4; i++) {
         const el = document.getElementById(`t${i}`);
         if (!el) continue;
         el.addEventListener('targetFound', targetFoundHandlers[i]);
@@ -396,13 +400,16 @@ export default function NavigationPage() {
     return () => {
       clearTimeout(setupTimeout);
       clearInterval(movementPromptInterval);
+
       const resetBtn = document.getElementById('resetBtn');
       const repeatBtn = document.getElementById('repeatBtn');
       const destEl = document.getElementById('dest');
+
       resetBtn?.removeEventListener('click', handleReset);
       repeatBtn?.removeEventListener('click', handleRepeat);
       destEl?.removeEventListener('change', handleDestinationChange);
-      for (let i = 0; i < 6; i++) {
+
+      for (let i = 0; i < 4; i++) {
         const el = document.getElementById(`t${i}`);
         if (el && targetFoundHandlers[i]) {
           el.removeEventListener('targetFound', targetFoundHandlers[i]);
@@ -412,18 +419,17 @@ export default function NavigationPage() {
   }, [scriptsLoaded, destination]);
 
   useEffect(() => {
-    // Update destination node when destination state changes
     if (scriptsLoaded) {
       const destEl = document.getElementById('dest') as HTMLSelectElement;
-      if (destEl && destEl.value !== destination) {
-        destEl.value = destination;
-      }
+      if (destEl && destEl.value !== destination) destEl.value = destination;
     }
   }, [destination, scriptsLoaded]);
 
   return (
     <>
-      <style dangerouslySetInnerHTML={{ __html: `
+      <style
+        dangerouslySetInnerHTML={{
+          __html: `
         body {
           margin: 0;
           overflow: hidden;
@@ -460,10 +466,7 @@ export default function NavigationPage() {
           cursor: pointer;
         }
 
-        button:hover {
-          background: rgba(255, 255, 255, 0.25);
-        }
-
+        button:hover,
         select:hover {
           background: rgba(255, 255, 255, 0.25);
         }
@@ -480,19 +483,23 @@ export default function NavigationPage() {
           font-size: 13px;
           opacity: 0.9;
         }
-      `}} />
+      `,
+        }}
+      />
 
       <div id="hud">
         <div id="row">
           <label htmlFor="dest" style={{ fontSize: '14px', opacity: 0.9 }}>
             Destination
           </label>
+
           <select id="dest" value={destination} onChange={(e) => setDestination(e.target.value)}>
-            <option value="two">2 sign</option>
+            <option value="elevator">Elevator</option>
             <option value="washroom">Washroom</option>
-            <option value="caution">Caution sign</option>
-            <option value="door">Door</option>
+            <option value="mainhall">Main hall</option>
+            <option value="exitdoor">Exit door</option>
           </select>
+
           <button id="resetBtn">Reset</button>
           <button id="repeatBtn">Repeat</button>
         </div>
@@ -504,7 +511,7 @@ export default function NavigationPage() {
       </div>
 
       {scriptsLoaded ? (
-        <div ref={sceneContainerRef}>
+        <div>
           <a-scene
             mindar-image="imageTargetSrc: /targets.mind; autoStart: true;"
             color-space="sRGB"
@@ -518,14 +525,10 @@ export default function NavigationPage() {
             <a-entity id="t1" mindar-image-target="targetIndex: 1"></a-entity>
             <a-entity id="t2" mindar-image-target="targetIndex: 2"></a-entity>
             <a-entity id="t3" mindar-image-target="targetIndex: 3"></a-entity>
-            <a-entity id="t4" mindar-image-target="targetIndex: 4"></a-entity>
-            <a-entity id="t5" mindar-image-target="targetIndex: 5"></a-entity>
           </a-scene>
         </div>
       ) : (
-        <div style={{ padding: '20px', textAlign: 'center', color: 'white' }}>
-          Loading AR libraries...
-        </div>
+        <div style={{ padding: '20px', textAlign: 'center', color: 'white' }}>Loading AR libraries...</div>
       )}
     </>
   );
