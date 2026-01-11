@@ -345,7 +345,6 @@ export default function IntegratedNavigation() {
 
       arrived = false;
 
-      speak('Pick a destination to start.', { interrupt: true });
     }
 
     function setDestinationHandler(newDest: string) {
