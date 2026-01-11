@@ -1,6 +1,8 @@
 import { NextResponse } from 'next/server';
 console.log("DEBUG: Process ENV Key check:", process.env.ELEVENLABS_API_KEY ? "FOUND" : "NOT FOUND");
 
+export const runtime = 'edge';
+
 export async function POST(req: Request) {
   try {
     const apiKey = process.env.NEXT_PUBLIC_ELEVENLABS_API_KEY;
