@@ -34,16 +34,19 @@ interface Edge {
 export default function IntegratedNavigation() {
   const statusElRef = useRef<HTMLDivElement>(null);
   const sceneRef = useRef<HTMLDivElement>(null);
+
   const [status, setStatus] = useState('Loading AR libraries...');
   const [destination, setDestination] = useState('exitdoor');
   const [scriptsLoaded, setScriptsLoaded] = useState(false);
   const [isListening, setIsListening] = useState(false);
+
   const recognitionRef = useRef<any>(null);
   const [mindarVideoElement, setMindarVideoElement] = useState<HTMLVideoElement | null>(null);
 
   // Load scripts dynamically
   useEffect(() => {
     if (typeof window === 'undefined') return;
+
     if (window.AFRAME && window.MINDAR) {
       setScriptsLoaded(true);
       return;
@@ -84,8 +87,7 @@ export default function IntegratedNavigation() {
     document.head.appendChild(aframeScript);
 
     const mindarScript = document.createElement('script');
-    mindarScript.src =
-      'https://cdn.jsdelivr.net/npm/mind-ar@1.2.5/dist/mindar-image-aframe.prod.js';
+    mindarScript.src = 'https://cdn.jsdelivr.net/npm/mind-ar@1.2.5/dist/mindar-image-aframe.prod.js';
     mindarScript.async = false;
     mindarScript.onload = () => {
       mindarLoaded = true;
@@ -107,7 +109,7 @@ export default function IntegratedNavigation() {
       if (!sceneEl) return false;
 
       const scene = sceneEl as any;
-      
+
       // Method 1: Try to get from MindAR system
       if (scene.systems && scene.systems['mindar-image-system']) {
         const mindarSystem = scene.systems['mindar-image-system'];
@@ -125,14 +127,14 @@ export default function IntegratedNavigation() {
         return true;
       }
 
-      // Method 3: Find video element in canvas or scene
+      // Method 3: Find video element near canvas
       const canvas = sceneEl.querySelector('canvas');
       if (canvas) {
-        // A-Frame video might be a sibling or in a container
         const parent = canvas.parentElement;
         if (parent) {
-          const videoEl = parent.querySelector('video') || 
-                         Array.from(parent.children).find((el: any) => el.tagName === 'VIDEO') as HTMLVideoElement;
+          const videoEl =
+            (parent.querySelector('video') as HTMLVideoElement) ||
+            (Array.from(parent.children).find((el: any) => el.tagName === 'VIDEO') as HTMLVideoElement);
           if (videoEl && videoEl instanceof HTMLVideoElement) {
             setMindarVideoElement(videoEl);
             return true;
@@ -140,13 +142,12 @@ export default function IntegratedNavigation() {
         }
       }
 
-      // Method 4: Check if there's a video element anywhere in document (A-Frame might create it)
+      // Method 4: Find any video with srcObject
       const allVideos = Array.from(document.querySelectorAll('video'));
       for (const vid of allVideos) {
-        if (vid.srcObject && vid.readyState > 0) {
-          // This is likely the camera video
+        if ((vid as HTMLVideoElement).srcObject && (vid as HTMLVideoElement).readyState > 0) {
           console.log('✅ Found video element in document');
-          setMindarVideoElement(vid);
+          setMindarVideoElement(vid as HTMLVideoElement);
           return true;
         }
       }
@@ -155,18 +156,13 @@ export default function IntegratedNavigation() {
       return false;
     };
 
-    // Wait a bit for scene to initialize
     const timeout = setTimeout(() => {
       if (tryGetVideo()) return;
-      
-      // Try periodically
+
       const interval = setInterval(() => {
-        if (tryGetVideo()) {
-          clearInterval(interval);
-        }
+        if (tryGetVideo()) clearInterval(interval);
       }, 500);
 
-      // Stop trying after 10 seconds
       setTimeout(() => clearInterval(interval), 10000);
     }, 1500);
 
@@ -184,7 +180,7 @@ export default function IntegratedNavigation() {
     };
   }, [scriptsLoaded]);
 
-  // Navigation logic (same as navigation/page.tsx)
+  // Navigation logic
   useEffect(() => {
     if (!scriptsLoaded || typeof window === 'undefined') return;
     if (!window.AFRAME || !window.MINDAR) return;
@@ -194,16 +190,18 @@ export default function IntegratedNavigation() {
 
     const nodes: Record<string, NodeData> = {
       elevator: { label: 'Elevator' },
-      washroom: { label: 'Washroom' },
+      washroom: { label: 'Bathroom' },
       mainhall: { label: 'Main hall' },
       exitdoor: { label: 'Exit door' },
     };
 
+    // 0..4 where 3 and 4 both map to exit door
     const indexToNode: Record<number, string> = {
       0: 'elevator',
       1: 'washroom',
       2: 'mainhall',
       3: 'exitdoor',
+      4: 'exitdoor',
     };
 
     const ACTIVE_NODES = new Set(['elevator', 'washroom', 'mainhall', 'exitdoor']);
@@ -216,7 +214,7 @@ export default function IntegratedNavigation() {
       ],
       mainhall: [
         { to: 'exitdoor', say: 'Go right and walk straight.' },
-        { to: 'washroom', say: 'Go left and walk straight.' },
+        { to: 'washroom', say: 'Take a left then walk straight.' },
       ],
       exitdoor: [{ to: 'mainhall', say: 'Do a 180, then walk straight.' }],
     };
@@ -252,16 +250,17 @@ export default function IntegratedNavigation() {
       return null;
     }
 
-    // Use the destination from state - this will be updated when voice recognition changes it
     let destinationNode = destination;
-    
-    // Update destinationNode when destination changes (for voice commands)
-    // The navigation logic will re-run when destination changes due to useEffect dependency
+
     let currentNode: string | null = null;
+    let lastNode: string | null = null;
     let path: string[] | null = null;
     let pathStep = 0;
 
     let lastSpoken = '';
+
+    // NEW: arrival lock so we don't keep talking after reaching destination
+    let arrived = false;
 
     function speak(msg: string, { interrupt = false }: { interrupt?: boolean } = {}) {
       lastSpoken = msg;
@@ -273,10 +272,7 @@ export default function IntegratedNavigation() {
       }
 
       try {
-        // Cancel any ongoing speech if interrupt is requested
-        if (interrupt) {
-          window.speechSynthesis.cancel();
-        }
+        if (interrupt) window.speechSynthesis.cancel();
 
         const utterance = new SpeechSynthesisUtterance(msg);
         utterance.lang = 'en-US';
@@ -292,6 +288,14 @@ export default function IntegratedNavigation() {
       } catch (e) {
         console.error('TTS Error:', e);
       }
+    }
+
+    function finishArrival(msg: string) {
+      arrived = true;
+      path = null;
+      pathStep = 0;
+      segmentPrompted = true;
+      speak(`${msg} Choose next destination.`, { interrupt: true });
     }
 
     let audioCtx: AudioContext | null = null;
@@ -325,21 +329,29 @@ export default function IntegratedNavigation() {
 
     function resetNav() {
       currentNode = null;
+      lastNode = null;
       path = null;
       pathStep = 0;
       segmentPrompted = false;
       lastConfirmedAt = 0;
-      speak('Pick a destination, then scan a landmark to start.', { interrupt: true });
+
+      arrived = false;
+
+      speak('Pick a destination to start.', { interrupt: true });
     }
 
     function setDestinationHandler(newDest: string) {
       destinationNode = newDest;
       currentNode = null;
+      lastNode = null;
       path = null;
       pathStep = 0;
       segmentPrompted = false;
       lastConfirmedAt = 0;
-      speak(`Destination set to ${nodes[destinationNode].label}. Scan a landmark to start.`, {
+
+      arrived = false;
+
+      speak(`Destination set to ${nodes[destinationNode].label}. Scan the room so we can locate you.`, {
         interrupt: true,
       });
     }
@@ -353,13 +365,12 @@ export default function IntegratedNavigation() {
       if (!path || !currentNode) return;
 
       if (pathStep >= path.length - 1) {
-        speak(`You have arrived at ${nodes[destinationNode].label}.`, { interrupt: true });
+        finishArrival(`You have arrived at ${nodes[destinationNode].label}.`);
         return;
       }
 
       const from = path[pathStep];
       const to = path[pathStep + 1];
-
       const direction = getEdgeInstruction(from, to);
 
       speak(`You are at ${nodes[from].label}. ${direction}`, { interrupt: true });
@@ -382,6 +393,7 @@ export default function IntegratedNavigation() {
     const movementPromptDelayMs = 4500;
 
     function maybeGiveMovementPrompt() {
+      if (arrived) return;
       if (!currentNode) return;
       if (!path) return;
       if (segmentPrompted) return;
@@ -389,7 +401,6 @@ export default function IntegratedNavigation() {
       const now = Date.now();
       if (now - lastConfirmedAt < movementPromptDelayMs) return;
 
-      // Check if speech synthesis is currently speaking
       if (typeof window !== 'undefined' && window.speechSynthesis && window.speechSynthesis.speaking) return;
 
       segmentPrompted = true;
@@ -399,6 +410,7 @@ export default function IntegratedNavigation() {
     const movementPromptInterval = setInterval(maybeGiveMovementPrompt, 700);
 
     function startRoutingFrom(nodeId: string) {
+      lastNode = currentNode;
       currentNode = nodeId;
       path = bfsPath(currentNode, destinationNode);
       pathStep = 0;
@@ -413,8 +425,21 @@ export default function IntegratedNavigation() {
       announceNextInstruction();
     }
 
+    function bathroomArrivalMessage(cameFrom: string | null) {
+      // from elevator: left, from main hall: right
+      const turn = cameFrom === 'elevator' ? 'Go left.' : 'Go right.';
+      finishArrival(
+        `You are at ${nodes.washroom.label}. ${turn} The door is in front of you. Walk with caution and open the door to enter.`
+      );
+    }
+
     function onNodeConfirmed(nodeId: string) {
       if (!ACTIVE_NODES.has(nodeId)) return;
+
+      // NEW: once arrived, ignore further targetFound events until destination changes or reset
+      if (arrived) return;
+
+      const cameFrom = currentNode;
 
       lastConfirmedAt = Date.now();
       segmentPrompted = false;
@@ -431,19 +456,32 @@ export default function IntegratedNavigation() {
         const expectedNext = path[pathStep + 1];
         if (nodeId === expectedNext) {
           pathStep += 1;
+          lastNode = cameFrom;
           currentNode = nodeId;
+
+          if (destinationNode === 'washroom' && nodeId === 'washroom') {
+            bathroomArrivalMessage(lastNode);
+            return;
+          }
+
           announceNextInstruction();
           return;
         }
       }
 
       if (nodeId !== currentNode) {
+        lastNode = cameFrom;
         currentNode = nodeId;
         path = bfsPath(currentNode, destinationNode);
         pathStep = 0;
 
         if (!path) {
           speak('I cannot find a route from here.', { interrupt: true });
+          return;
+        }
+
+        if (destinationNode === 'washroom' && nodeId === 'washroom') {
+          bathroomArrivalMessage(lastNode);
           return;
         }
 
@@ -477,7 +515,7 @@ export default function IntegratedNavigation() {
     }
 
     const targetFoundHandlers: (() => void)[] = [];
-    for (let i = 0; i < 4; i++) {
+    for (let i = 0; i < 5; i++) {
       const handler = () => onTargetFound(i);
       targetFoundHandlers.push(handler);
     }
@@ -491,7 +529,7 @@ export default function IntegratedNavigation() {
       if (repeatBtn) repeatBtn.addEventListener('click', handleRepeat);
       if (destEl) destEl.addEventListener('change', handleDestinationChange);
 
-      for (let i = 0; i < 4; i++) {
+      for (let i = 0; i < 5; i++) {
         const el = document.getElementById(`t${i}`);
         if (!el) continue;
         el.addEventListener('targetFound', targetFoundHandlers[i]);
@@ -512,17 +550,14 @@ export default function IntegratedNavigation() {
       repeatBtn?.removeEventListener('click', handleRepeat);
       destEl?.removeEventListener('change', handleDestinationChange);
 
-      for (let i = 0; i < 4; i++) {
+      for (let i = 0; i < 5; i++) {
         const el = document.getElementById(`t${i}`);
         if (el && targetFoundHandlers[i]) {
           el.removeEventListener('targetFound', targetFoundHandlers[i]);
         }
-      }
+      };
     };
   }, [scriptsLoaded, destination]);
-
-  // This useEffect is no longer needed - the select is a controlled component
-  // Keeping it for backward compatibility but it should work via React's controlled component pattern
 
   // Voice recognition
   useEffect(() => {
@@ -535,35 +570,23 @@ export default function IntegratedNavigation() {
       return;
     }
 
-    // Node labels for TTS
     const nodeLabels: Record<string, string> = {
-      washroom: 'Washroom',
+      washroom: 'Bathroom',
       elevator: 'Elevator',
       mainhall: 'Main hall',
       exitdoor: 'Exit door',
     };
 
-    // TTS function for voice recognition using browser's built-in SpeechSynthesis
     const speakViaTTS = (text: string) => {
-      if (typeof window === 'undefined' || !window.speechSynthesis) {
-        console.warn('SpeechSynthesis not supported');
-        return;
-      }
+      if (typeof window === 'undefined' || !window.speechSynthesis) return;
 
       try {
-        // Cancel any ongoing speech
         window.speechSynthesis.cancel();
-
         const utterance = new SpeechSynthesisUtterance(text);
         utterance.lang = 'en-US';
         utterance.rate = 1.0;
         utterance.pitch = 1.0;
         utterance.volume = 1.0;
-
-        utterance.onerror = (event) => {
-          console.error('SpeechSynthesis error:', event);
-        };
-
         window.speechSynthesis.speak(utterance);
       } catch (e) {
         console.error('TTS Error:', e);
@@ -580,21 +603,13 @@ export default function IntegratedNavigation() {
       recognition.continuous = true;
       recognition.interimResults = false;
 
-      recognition.onstart = () => {
-        setIsListening(true);
-      };
+      recognition.onstart = () => setIsListening(true);
 
       recognition.onend = () => {
         setIsListening(false);
         if (!shouldStop) {
           setTimeout(() => {
-            if (!shouldStop) {
-              try {
-                startRecognition();
-              } catch (e) {
-                console.error('Error restarting recognition:', e);
-              }
-            }
+            if (!shouldStop) startRecognition();
           }, 100);
         }
       };
@@ -602,13 +617,6 @@ export default function IntegratedNavigation() {
       recognition.onresult = (event: any) => {
         const rawTranscript = event.results[event.results.length - 1][0].transcript;
         const transcript = rawTranscript.toLowerCase();
-
-        // Debug: Print speech-to-text results
-        console.log('🎤 Speech-to-Text [Navigation]:', {
-          raw: rawTranscript,
-          processed: transcript,
-          confidence: event.results[event.results.length - 1][0].confidence,
-        });
 
         const keywordMap: Record<string, string> = {
           washroom: 'washroom',
@@ -628,22 +636,15 @@ export default function IntegratedNavigation() {
         for (const [keyword, dest] of Object.entries(keywordMap)) {
           if (transcript.includes(keyword)) {
             matchedDestination = dest;
-            console.log(`✅ Keyword matched: "${keyword}" → ${dest}`);
             break;
           }
         }
 
         if (matchedDestination && matchedDestination !== destination) {
           const checkpointName = nodeLabels[matchedDestination] || matchedDestination;
-          console.log(`🎯 Destination changed: ${destination} → ${matchedDestination} (${checkpointName})`);
           setDestination(matchedDestination);
           setStatus(`Destination set to ${checkpointName} via voice command.`);
-          // Speak the matched checkpoint
-          speakViaTTS(`Checkpoint detected: ${checkpointName}. Destination set to ${checkpointName}.`);
-        } else if (matchedDestination) {
-          console.log(`ℹ️ Destination already set to: ${matchedDestination}`);
-        } else {
-          console.log('❌ No destination matched for:', transcript);
+          speakViaTTS(`Destination set to ${checkpointName}.`);
         }
       };
 
@@ -657,13 +658,7 @@ export default function IntegratedNavigation() {
         } else if (err.error !== 'aborted' && err.error !== 'no-speech') {
           if (!shouldStop) {
             setTimeout(() => {
-              if (!shouldStop) {
-                try {
-                  startRecognition();
-                } catch (e) {
-                  console.error('Error restarting after error:', e);
-                }
-              }
+              if (!shouldStop) startRecognition();
             }, 1000);
           }
         }
@@ -686,14 +681,9 @@ export default function IntegratedNavigation() {
       if (recognitionRef.current) {
         try {
           recognitionRef.current.stop();
-        } catch (e) {
-          // Ignore errors when stopping
-        }
+        } catch {}
       }
-      // Cancel any ongoing speech synthesis
-      if (typeof window !== 'undefined' && window.speechSynthesis) {
-        window.speechSynthesis.cancel();
-      }
+      if (typeof window !== 'undefined' && window.speechSynthesis) window.speechSynthesis.cancel();
       setIsListening(false);
     };
   }, [scriptsLoaded, destination]);
@@ -764,12 +754,13 @@ export default function IntegratedNavigation() {
         }
 
         .integrated-scene {
-          position: relative;
+          position: fixed;
+          inset: 0;
           width: 100%;
           height: 100vh;
           z-index: 1;
         }
-        
+
         a-scene {
           z-index: 1 !important;
         }
@@ -785,7 +776,7 @@ export default function IntegratedNavigation() {
 
           <select id="dest" value={destination} onChange={(e) => setDestination(e.target.value)}>
             <option value="elevator">Elevator</option>
-            <option value="washroom">Washroom</option>
+            <option value="washroom">Bathroom</option>
             <option value="mainhall">Main hall</option>
             <option value="exitdoor">Exit door</option>
           </select>
@@ -795,9 +786,7 @@ export default function IntegratedNavigation() {
             className="voice-btn"
             disabled
             style={{
-              background: isListening
-                ? 'rgba(34, 197, 94, 0.8)'
-                : 'rgba(156, 163, 175, 0.8)',
+              background: isListening ? 'rgba(34, 197, 94, 0.8)' : 'rgba(156, 163, 175, 0.8)',
               cursor: 'default',
               opacity: 1,
             }}
@@ -819,6 +808,7 @@ export default function IntegratedNavigation() {
         {scriptsLoaded ? (
           <>
             <a-scene
+              style={{ position: 'fixed', inset: 0, width: '100vw', height: '100vh' }}
               mindar-image="imageTargetSrc: /targets.mind; autoStart: true;"
               color-space="sRGB"
               renderer="colorManagement: true"
@@ -831,10 +821,10 @@ export default function IntegratedNavigation() {
               <a-entity id="t1" mindar-image-target="targetIndex: 1"></a-entity>
               <a-entity id="t2" mindar-image-target="targetIndex: 2"></a-entity>
               <a-entity id="t3" mindar-image-target="targetIndex: 3"></a-entity>
+              <a-entity id="t4" mindar-image-target="targetIndex: 4"></a-entity>
             </a-scene>
-            {mindarVideoElement && (
-              <ObjectDetection externalVideoElement={mindarVideoElement} showUI={false} />
-            )}
+
+            {mindarVideoElement && <ObjectDetection externalVideoElement={mindarVideoElement} showUI={false} />}
           </>
         ) : (
           <div style={{ padding: '20px', textAlign: 'center', color: 'white' }}>Loading AR libraries...</div>
