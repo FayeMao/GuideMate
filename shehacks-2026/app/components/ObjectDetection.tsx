@@ -32,6 +32,13 @@ const ObjectDetection = ({ externalVideoElement, autoStart = false, showUI = tru
   // Track if checkpoint is currently being announced (from MindAR)
   const checkpointSpeakingRef = useRef<boolean>(false);
 
+  // Helper function to normalize class names (replace fridge variants with wall)
+  const normalizeClassName = (className: string): string => {
+    const lowerClassName = className.toLowerCase();
+    const fridgeVariants = ['fridge', 'refrigerator', 'refrigerators', 'refridgerator', 'refridgerators', 'fridge-freezer', 'fridge freezer'];
+    return fridgeVariants.includes(lowerClassName) ? 'wall' : className;
+  };
+
   useEffect(() => {
     loadModel();
     return () => {
@@ -148,7 +155,7 @@ const ObjectDetection = ({ externalVideoElement, autoStart = false, showUI = tru
 
     if (veryCloseObjects.length > 0) {
       lastProximityAlertRef.current = now;
-      const objectNames = veryCloseObjects.map(o => o.class).join(', ');
+      const objectNames = veryCloseObjects.map(o => normalizeClassName(o.class)).join(', ');
       speakText(`Warning! Objects very close: ${objectNames}`);
     }
   };
@@ -168,8 +175,9 @@ const ObjectDetection = ({ externalVideoElement, autoStart = false, showUI = tru
 
     predictions.forEach((pred) => {
       const distance = estimateDistance(pred);
-      if (!objectsByDistance[distance].includes(pred.class)) {
-        objectsByDistance[distance].push(pred.class);
+      const normalizedClass = normalizeClassName(pred.class);
+      if (!objectsByDistance[distance].includes(normalizedClass)) {
+        objectsByDistance[distance].push(normalizedClass);
       }
     });
 
@@ -284,7 +292,8 @@ const ObjectDetection = ({ externalVideoElement, autoStart = false, showUI = tru
       
       ctx.fillStyle = colorMap[distance] || '#00FF00';
       ctx.font = 'bold 16px Arial';
-      const label = `${prediction.class} (${Math.round(prediction.score * 100)}%)`;
+      const normalizedClass = normalizeClassName(prediction.class);
+      const label = `${normalizedClass} (${Math.round(prediction.score * 100)}%)`;
       const distLabel = `Dist: ${distance}`;
       
       const bgWidth = Math.max(ctx.measureText(label).width, ctx.measureText(distLabel).width) + 10;
@@ -370,6 +379,7 @@ const ObjectDetection = ({ externalVideoElement, autoStart = false, showUI = tru
             <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
               {detections.map((d, i) => {
                 const distance = estimateDistance(d);
+                const normalizedClass = normalizeClassName(d.class);
                 const colorClass = distance === 'Very Close' ? 'border-red-500' :
                                  distance === 'Close' ? 'border-orange-500' :
                                  distance === 'Medium' ? 'border-yellow-500' :
@@ -377,7 +387,7 @@ const ObjectDetection = ({ externalVideoElement, autoStart = false, showUI = tru
                 
                 return (
                   <div key={i} className={`bg-gray-800 p-3 rounded-lg border-l-4 ${colorClass}`}>
-                    <p className="font-bold capitalize">{d.class}</p>
+                    <p className="font-bold capitalize">{normalizedClass}</p>
                     <p className="text-sm text-gray-400">{distance}</p>
                     {distance === 'Very Close' && (
                       <p className="text-xs text-red-400 mt-1">⚠️ Warning!</p>
