@@ -3,6 +3,8 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
+import * as cocoSsd from '@tensorflow-models/coco-ssd';
+import '@tensorflow/tfjs';
 
 declare global {
   interface Window {
@@ -31,12 +33,25 @@ interface Edge {
   say: string;
 }
 
-export default function NavigationPage() {
+export default function IntegratedNavigation() {
   const statusElRef = useRef<HTMLDivElement>(null);
   const sceneContainerRef = useRef<HTMLDivElement>(null);
+  const videoRef = useRef<HTMLVideoElement>(null);
+  
   const [status, setStatus] = useState('Loading AR libraries...');
   const [destination, setDestination] = useState('two');
   const [scriptsLoaded, setScriptsLoaded] = useState(false);
+  
+  // Object detection state
+  const [model, setModel] = useState<cocoSsd.ObjectDetection | null>(null);
+  const [isLoadingModel, setIsLoadingModel] = useState(true);
+  const [detections, setDetections] = useState<cocoSsd.DetectedObject[]>([]);
+  const [isDetecting, setIsDetecting] = useState(false);
+  const [error, setError] = useState('');
+  
+  // Refs for throttling
+  const lastProximityAlertRef = useRef<number>(0);
+  const isSpeakingRef = useRef<boolean>(false);
 
   // Load scripts dynamically
   useEffect(() => {
@@ -46,12 +61,10 @@ export default function NavigationPage() {
       return;
     }
 
-    // Check if scripts are already in the document
     const existingAframe = document.querySelector('script[src*="aframe"]');
     const existingMindar = document.querySelector('script[src*="mind-ar"]');
 
     if (existingAframe && existingMindar) {
-      // Scripts are loading, wait for them
       const checkInterval = setInterval(() => {
         if (window.AFRAME && window.MINDAR) {
           setScriptsLoaded(true);
@@ -70,7 +83,6 @@ export default function NavigationPage() {
       }
     };
 
-    // Load A-Frame
     const aframeScript = document.createElement('script');
     aframeScript.src = 'https://aframe.io/releases/1.5.0/aframe.min.js';
     aframeScript.async = false;
@@ -83,7 +95,6 @@ export default function NavigationPage() {
     };
     document.head.appendChild(aframeScript);
 
-    // Load MindAR after A-Frame
     const mindarScript = document.createElement('script');
     mindarScript.src = 'https://cdn.jsdelivr.net/npm/mind-ar@1.2.5/dist/mindar-image-aframe.prod.js';
     mindarScript.async = false;
@@ -96,6 +107,190 @@ export default function NavigationPage() {
     };
     document.head.appendChild(mindarScript);
   }, []);
+
+  // Load object detection model
+  useEffect(() => {
+    const loadModel = async () => {
+      try {
+        setIsLoadingModel(true);
+        const loadedModel = await cocoSsd.load();
+        setModel(loadedModel);
+        setIsLoadingModel(false);
+      } catch (err) {
+        setError('Failed to load object detection model: ' + (err as Error).message);
+        setIsLoadingModel(false);
+      }
+    };
+    loadModel();
+  }, []);
+
+  // Start object detection - try to get camera stream
+  useEffect(() => {
+    if (!model || !scriptsLoaded) return;
+    
+    // Wait a bit for MindAR to initialize, then try to get camera
+    const timeout = setTimeout(() => {
+      startObjectDetectionCamera();
+    }, 2000);
+    
+    return () => {
+      clearTimeout(timeout);
+      stopObjectDetectionCamera();
+    };
+  }, [model, scriptsLoaded]);
+
+  const startObjectDetectionCamera = async () => {
+    if (!model || !videoRef.current || isDetecting) return;
+    
+    try {
+      // Try to get camera stream - some browsers allow multiple streams
+      const stream = await navigator.mediaDevices.getUserMedia({ 
+        video: { 
+          facingMode: 'environment',
+          width: { ideal: 640 },
+          height: { ideal: 480 }
+        } 
+      });
+      
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
+        
+        const playVideo = () => {
+          if (videoRef.current && videoRef.current.readyState >= 2) {
+            videoRef.current.play().then(() => {
+              setIsDetecting(true);
+              detectObjectsFromVideo();
+            }).catch(err => {
+              console.error('Error playing video:', err);
+            });
+          } else {
+            setTimeout(playVideo, 100);
+          }
+        };
+        
+        videoRef.current.onloadedmetadata = playVideo;
+        
+        // Fallback if onloadedmetadata doesn't fire
+        setTimeout(playVideo, 1000);
+      }
+    } catch (err: any) {
+      console.error('Camera access error for object detection:', err);
+      // Camera might be in use by MindAR - object detection won't work but navigation will
+      const errorMsg = err?.message || 'Unknown error';
+      if (errorMsg.includes('Permission denied') || errorMsg.includes('NotAllowedError')) {
+        console.log('Camera permission denied. Please grant camera access.');
+      } else if (errorMsg.includes('NotReadableError') || errorMsg.includes('DevicesNotFoundError')) {
+        console.log('Camera is already in use by MindAR. Object detection disabled, but navigation will still work.');
+      } else {
+        console.log('Camera unavailable. Object detection disabled, but navigation will still work.');
+      }
+    }
+  };
+
+  const stopObjectDetectionCamera = () => {
+    if (videoRef.current?.srcObject) {
+      const stream = videoRef.current.srcObject as MediaStream;
+      stream.getTracks().forEach(t => t.stop());
+      videoRef.current.srcObject = null;
+    }
+    setIsDetecting(false);
+  };
+
+  const speakText = (text: string, interrupt = false) => {
+    try {
+      if (interrupt) window.speechSynthesis.cancel();
+      isSpeakingRef.current = true;
+      const u = new SpeechSynthesisUtterance(text);
+      u.rate = 1.0;
+      u.onend = () => {
+        isSpeakingRef.current = false;
+      };
+      window.speechSynthesis.speak(u);
+    } catch (e) {
+      console.error('Speech error:', e);
+      isSpeakingRef.current = false;
+    }
+  };
+
+  const estimateDistance = (prediction: cocoSsd.DetectedObject, videoWidth: number, videoHeight: number): string => {
+    const [x, y, width, height] = prediction.bbox;
+    const boxArea = width * height;
+    const canvasArea = videoWidth * videoHeight;
+    const screenPercentage = (boxArea / canvasArea) * 100;
+    
+    const isLarge = ['person', 'car', 'bicycle', 'tv', 'couch'].includes(prediction.class);
+    const isSmall = ['bottle', 'cup', 'cell phone', 'mouse', 'remote'].includes(prediction.class);
+    
+    let thresholds = { vClose: 25, close: 10, med: 3 };
+    if (isSmall) thresholds = { vClose: 8, close: 3, med: 1 };
+    if (isLarge) thresholds = { vClose: 40, close: 20, med: 8 };
+
+    if (screenPercentage > thresholds.vClose) return 'Very Close';
+    if (screenPercentage > thresholds.close) return 'Close';
+    if (screenPercentage > thresholds.med) return 'Medium';
+    return screenPercentage > 0.5 ? 'Far' : 'Very Far';
+  };
+
+  const checkProximityAlerts = (predictions: cocoSsd.DetectedObject[], videoWidth: number, videoHeight: number) => {
+    const now = Date.now();
+    if (now - lastProximityAlertRef.current < 3000) return;
+    if (isSpeakingRef.current) return;
+
+    const veryCloseObjects = predictions.filter(p => {
+      const distance = estimateDistance(p, videoWidth, videoHeight);
+      return distance === 'Very Close';
+    });
+
+    // Also check for walls/barriers (person, door-like objects)
+    const barriers = predictions.filter(p => {
+      const objClass = p.class.toLowerCase();
+      return ['person', 'door', 'window'].includes(objClass);
+    });
+
+    const closeBarriers = barriers.filter(p => {
+      const distance = estimateDistance(p, videoWidth, videoHeight);
+      return distance === 'Very Close' || distance === 'Close';
+    });
+
+    if (veryCloseObjects.length > 0 || closeBarriers.length > 0) {
+      lastProximityAlertRef.current = now;
+      const allObjects = [...veryCloseObjects, ...closeBarriers];
+      const objectNames = [...new Set(allObjects.map(o => o.class))].join(', ');
+      speakText(`Warning! Obstacle detected: ${objectNames}. Please stop or turn.`, false);
+    }
+  };
+
+  const detectObjectsFromVideo = async () => {
+    if (!model || !videoRef.current) return;
+    
+    const detect = async () => {
+      if (!isDetecting || !videoRef.current || !model) return;
+      
+      try {
+        if (videoRef.current.readyState < 2) {
+          requestAnimationFrame(detect);
+          return;
+        }
+        
+        const predictions = await model.detect(videoRef.current);
+        const filtered = predictions.filter(p => p.score > 0.6);
+        setDetections(filtered);
+        
+        const videoWidth = videoRef.current.videoWidth || 640;
+        const videoHeight = videoRef.current.videoHeight || 480;
+        
+        checkProximityAlerts(filtered, videoWidth, videoHeight);
+        
+        // Run detection every few frames to reduce load
+        setTimeout(() => requestAnimationFrame(detect), 200);
+      } catch (err) {
+        console.error('Detection error:', err);
+        setTimeout(() => requestAnimationFrame(detect), 1000);
+      }
+    };
+    
+    detect();
+  };
 
   useEffect(() => {
     if (!scriptsLoaded || typeof window === 'undefined') return;
@@ -177,15 +372,7 @@ export default function NavigationPage() {
     function speak(msg: string, { interrupt = false }: { interrupt?: boolean } = {}) {
       lastSpoken = msg;
       setStatus(msg);
-
-      try {
-        if (interrupt) window.speechSynthesis.cancel();
-        const u = new SpeechSynthesisUtterance(msg);
-        u.rate = 1.0;
-        window.speechSynthesis.speak(u);
-      } catch (e) {
-        console.error(e);
-      }
+      speakText(msg, interrupt);
     }
 
     let audioCtx: AudioContext | null = null;
@@ -355,7 +542,6 @@ export default function NavigationPage() {
       onNodeConfirmed(nodeId);
     }
 
-    // Set up event handlers
     function handleRepeat() {
       if (lastSpoken) speak(lastSpoken, { interrupt: true });
     }
@@ -375,7 +561,6 @@ export default function NavigationPage() {
       targetFoundHandlers.push(handler);
     }
 
-    // Wait a bit for scene to be in DOM before setting up event listeners
     const setupTimeout = setTimeout(() => {
       const resetBtn = document.getElementById('resetBtn');
       const repeatBtn = document.getElementById('repeatBtn');
@@ -413,7 +598,6 @@ export default function NavigationPage() {
   }, [scriptsLoaded, destination]);
 
   useEffect(() => {
-    // Update destination node when destination state changes
     if (scriptsLoaded) {
       const destEl = document.getElementById('dest') as HTMLSelectElement;
       if (destEl && destEl.value !== destination) {
@@ -422,12 +606,19 @@ export default function NavigationPage() {
     }
   }, [destination, scriptsLoaded]);
 
+  const hasCloseObjects = detections.some(d => {
+    // Estimate distance - use default video dimensions if canvas not available
+    const videoWidth = 640;
+    const videoHeight = 480;
+    const dist = estimateDistance(d, videoWidth, videoHeight);
+    return dist === 'Very Close' || dist === 'Close';
+  });
+
   return (
     <>
       <style dangerouslySetInnerHTML={{ __html: `
         body {
           margin: 0;
-          overflow: hidden;
           font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial;
         }
 
@@ -438,7 +629,7 @@ export default function NavigationPage() {
           top: 12px;
           padding: 12px;
           border-radius: 12px;
-          background: rgba(0, 0, 0, 0.6);
+          background: rgba(0, 0, 0, 0.75);
           color: white;
           z-index: 10;
         }
@@ -481,6 +672,42 @@ export default function NavigationPage() {
           font-size: 13px;
           opacity: 0.9;
         }
+
+        #object-warning {
+          position: fixed;
+          bottom: 20px;
+          left: 50%;
+          transform: translateX(-50%);
+          padding: 16px 24px;
+          border-radius: 12px;
+          background: rgba(255, 0, 0, 0.9);
+          color: white;
+          font-size: 18px;
+          font-weight: bold;
+          z-index: 20;
+          display: none;
+          animation: pulse 1s infinite;
+        }
+
+        #object-warning.active {
+          display: block;
+        }
+
+        @keyframes pulse {
+          0%, 100% { opacity: 1; }
+          50% { opacity: 0.7; }
+        }
+
+        .detection-canvas {
+          position: fixed;
+          top: 0;
+          left: 0;
+          width: 200px;
+          height: 150px;
+          z-index: 5;
+          pointer-events: none;
+          opacity: 0.3;
+        }
       `}} />
 
       <div id="hud">
@@ -501,11 +728,23 @@ export default function NavigationPage() {
         <div id="status" ref={statusElRef}>
           {status}
         </div>
-        <div id="small">Hold phone steady at chest height. You will hear a beep when a landmark is confirmed.</div>
+        <div id="small">
+          Hold phone steady at chest height. You will hear a beep when a landmark is confirmed.
+          {isLoadingModel && ' Loading object detection...'}
+        </div>
       </div>
 
+      {hasCloseObjects && (
+        <div id="object-warning" className="active">
+          ⚠️ Obstacle Detected - Please Stop or Turn
+        </div>
+      )}
+
+      {/* Hidden video element for object detection */}
+      <video ref={videoRef} style={{ display: 'none' }} playsInline />
+
       {scriptsLoaded ? (
-        <div ref={sceneContainerRef}>
+        <div ref={sceneContainerRef} style={{ position: 'relative', width: '100vw', height: '100vh' }}>
           <a-scene
             mindar-image="imageTargetSrc: /targets.mind; autoStart: true;"
             color-space="sRGB"
@@ -524,8 +763,24 @@ export default function NavigationPage() {
           </a-scene>
         </div>
       ) : (
-        <div style={{ padding: '20px', textAlign: 'center', color: 'white' }}>
+        <div style={{ padding: '20px', textAlign: 'center', color: 'white', marginTop: '100px' }}>
           Loading AR libraries...
+        </div>
+      )}
+
+      {error && (
+        <div style={{ 
+          position: 'fixed', 
+          bottom: '80px', 
+          left: '50%', 
+          transform: 'translateX(-50%)',
+          padding: '12px 24px',
+          background: 'rgba(255, 0, 0, 0.8)',
+          color: 'white',
+          borderRadius: '8px',
+          zIndex: 15
+        }}>
+          {error}
         </div>
       )}
     </>

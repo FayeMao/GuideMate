@@ -1,18 +1,26 @@
 'use client';
 
 import React, { useRef, useState, useEffect } from 'react';
-import { Camera, Upload, Square } from 'lucide-react';
+import { Camera, Square, MapPin } from 'lucide-react';
 import * as cocoSsd from '@tensorflow-models/coco-ssd';
 import '@tensorflow/tfjs';
+
+// Define checkpoint interface
+interface Checkpoint {
+  id: string;
+  name: string;
+  targetObjects: string[];
+  reached: boolean;
+}
 
 const ObjectDetection = () => {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const fileInputRef = useRef<HTMLInputElement>(null);
   
   // Refs for throttling and state tracking
   const lastAnnouncementRef = useRef<string>('');
   const lastAnnouncementTimeRef = useRef<number>(0);
+  const lastProximityAlertRef = useRef<number>(0);
   
   const [model, setModel] = useState<cocoSsd.ObjectDetection | null>(null);
   const [isLoading, setIsLoading] = useState(true);
@@ -21,6 +29,14 @@ const ObjectDetection = () => {
   const [useCamera, setUseCamera] = useState(false);
   const [error, setError] = useState('');
   const [isSpeaking, setIsSpeaking] = useState(false);
+  
+  // Navigation-specific state
+  const [checkpoints, setCheckpoints] = useState<Checkpoint[]>([
+    { id: '1', name: 'Kitchen Area', targetObjects: ['bottle', 'cup', 'bowl'], reached: false },
+    { id: '2', name: 'Living Room', targetObjects: ['couch', 'tv', 'remote'], reached: false },
+    { id: '3', name: 'Workspace', targetObjects: ['laptop', 'keyboard', 'mouse'], reached: false },
+  ]);
+  const [currentCheckpoint, setCurrentCheckpoint] = useState<string>('');
 
   useEffect(() => {
     loadModel();
@@ -44,6 +60,74 @@ const ObjectDetection = () => {
     } catch (err) {
       setError('Failed to load model: ' + (err as Error).message);
       setIsLoading(false);
+    }
+  };
+
+  const speakText = async (text: string) => {
+    if (isSpeaking) return;
+    
+    try {
+      setIsSpeaking(true);
+      const response = await fetch('/api/tts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text }),
+      });
+
+      if (!response.ok) throw new Error('Speech failed');
+
+      const audioBlob = await response.blob();
+      const audioUrl = URL.createObjectURL(audioBlob);
+      const audio = new Audio(audioUrl);
+
+      audio.onended = () => {
+        setIsSpeaking(false);
+        URL.revokeObjectURL(audioUrl);
+      };
+
+      await audio.play();
+    } catch (err) {
+      console.error('TTS Error:', err);
+      setIsSpeaking(false);
+    }
+  };
+
+  const checkForCheckpoints = (predictions: cocoSsd.DetectedObject[]) => {
+    const detectedClasses = predictions.map(p => p.class);
+    
+    checkpoints.forEach((checkpoint) => {
+      if (!checkpoint.reached) {
+        const hasRequiredObjects = checkpoint.targetObjects.some(obj => 
+          detectedClasses.includes(obj)
+        );
+        
+        if (hasRequiredObjects) {
+          setCheckpoints(prev => 
+            prev.map(cp => 
+              cp.id === checkpoint.id ? { ...cp, reached: true } : cp
+            )
+          );
+          setCurrentCheckpoint(checkpoint.name);
+          speakText(`Checkpoint reached: ${checkpoint.name}`);
+        }
+      }
+    });
+  };
+
+  const checkProximityAlerts = (predictions: cocoSsd.DetectedObject[]) => {
+    const now = Date.now();
+    // Only alert every 3 seconds to avoid spam
+    if (now - lastProximityAlertRef.current < 3000) return;
+
+    const veryCloseObjects = predictions.filter(p => {
+      const distance = estimateDistance(p);
+      return distance === 'Very Close';
+    });
+
+    if (veryCloseObjects.length > 0) {
+      lastProximityAlertRef.current = now;
+      const objectNames = veryCloseObjects.map(o => o.class).join(', ');
+      speakText(`Warning! Objects very close: ${objectNames}`);
     }
   };
 
@@ -79,54 +163,11 @@ const ObjectDetection = () => {
     if (announcement === lastAnnouncementRef.current) return;
     lastAnnouncementRef.current = announcement;
 
-    try {
-      setIsSpeaking(true);
-      const response = await fetch('/api/tts', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text: announcement }),
-      });
-
-      if (!response.ok) throw new Error('Speech failed');
-
-      const audioBlob = await response.blob();
-      const audioUrl = URL.createObjectURL(audioBlob);
-      const audio = new Audio(audioUrl);
-
-      audio.onended = () => {
-        setIsSpeaking(false);
-        URL.revokeObjectURL(audioUrl);
-      };
-
-      await audio.play();
-    } catch (err) {
-      console.error('TTS Error:', err);
-      setIsSpeaking(false);
-    }
+    await speakText(announcement);
   };
 
   const testAudio = async () => {
-    if (isSpeaking) return;
-    setIsSpeaking(true);
-    try {
-      const response = await fetch('/api/tts', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text: "Audio system is active." }),
-      });
-      if (!response.ok) throw new Error('Proxy error');
-      const audioBlob = await response.blob();
-      const audioUrl = URL.createObjectURL(audioBlob);
-      const audio = new Audio(audioUrl);
-      audio.onended = () => {
-        setIsSpeaking(false);
-        URL.revokeObjectURL(audioUrl);
-      };
-      await audio.play();
-    } catch (err) {
-      setError("Audio test failed. Check server logs.");
-      setIsSpeaking(false);
-    }
+    await speakText("Audio system is active.");
   };
 
   const detectObjects = async () => {
@@ -141,6 +182,12 @@ const ObjectDetection = () => {
         const filtered = predictions.filter(p => p.score > 0.6);
         setDetections(filtered);
         
+        // Check for checkpoints
+        checkForCheckpoints(filtered);
+        
+        // Check for proximity alerts
+        checkProximityAlerts(filtered);
+        
         const now = Date.now();
         if (now - lastAnnouncementTimeRef.current > 5000 && !isSpeaking && filtered.length > 0) {
           lastAnnouncementTimeRef.current = now;
@@ -151,15 +198,11 @@ const ObjectDetection = () => {
           const canvas = canvasRef.current;
           const ctx = canvas.getContext('2d');
           
-          // Match canvas size to the actual video stream resolution
           canvas.width = videoRef.current.videoWidth;
           canvas.height = videoRef.current.videoHeight;
           
           if (ctx) {
-            // 1. DRAW THE VIDEO FRAME FIRST (This fixes the black screen)
             ctx.drawImage(videoRef.current, 0, 0, canvas.width, canvas.height);
-            
-            // 2. DRAW THE BOXES ON TOP
             drawBoundingBoxes(filtered, canvas);
           }
         }
@@ -178,8 +221,8 @@ const ObjectDetection = () => {
     const canvasArea = (canvasRef.current?.width || 1280) * (canvasRef.current?.height || 720);
     const screenPercentage = (boxArea / canvasArea) * 100;
     
-    const isLarge = ['person', 'car', 'bicycle', 'tv'].includes(prediction.class);
-    const isSmall = ['bottle', 'cup', 'cell phone', 'mouse'].includes(prediction.class);
+    const isLarge = ['person', 'car', 'bicycle', 'tv', 'couch'].includes(prediction.class);
+    const isSmall = ['bottle', 'cup', 'cell phone', 'mouse', 'remote'].includes(prediction.class);
     
     let thresholds = { vClose: 25, close: 10, med: 3 };
     if (isSmall) thresholds = { vClose: 8, close: 3, med: 1 };
@@ -199,11 +242,20 @@ const ObjectDetection = () => {
       const [x, y, width, height] = prediction.bbox;
       const distance = estimateDistance(prediction);
       
-      ctx.strokeStyle = '#00FF00';
+      // Color code by distance
+      const colorMap: { [key: string]: string } = {
+        'Very Close': '#FF0000',
+        'Close': '#FF9900',
+        'Medium': '#FFFF00',
+        'Far': '#00FF00',
+        'Very Far': '#00FFFF'
+      };
+      
+      ctx.strokeStyle = colorMap[distance] || '#00FF00';
       ctx.lineWidth = 3;
       ctx.strokeRect(x, y, width, height);
       
-      ctx.fillStyle = '#00FF00';
+      ctx.fillStyle = colorMap[distance] || '#00FF00';
       ctx.font = 'bold 16px Arial';
       const label = `${prediction.class} (${Math.round(prediction.score * 100)}%)`;
       const distLabel = `Dist: ${distance}`;
@@ -243,10 +295,15 @@ const ObjectDetection = () => {
     setIsDetecting(false);
   };
 
+  const resetCheckpoints = () => {
+    setCheckpoints(prev => prev.map(cp => ({ ...cp, reached: false })));
+    setCurrentCheckpoint('');
+  };
+
   return (
     <div className="min-h-screen bg-gray-900 p-6 text-white font-sans">
       <div className="max-w-4xl mx-auto text-center">
-        <h1 className="text-3xl font-bold mb-4">Vision AI Assistant</h1>
+        <h1 className="text-3xl font-bold mb-4">PathPilot Vision Assistant</h1>
         
         {error && <div className="bg-red-900 border border-red-500 p-3 mb-4 rounded">{error}</div>}
 
@@ -263,6 +320,41 @@ const ObjectDetection = () => {
           <button onClick={testAudio} disabled={isSpeaking} className="bg-purple-600 px-6 py-2 rounded disabled:opacity-50">
             {isSpeaking ? '🔊 Speaking...' : '🔊 Test Audio'}
           </button>
+          <button onClick={resetCheckpoints} className="bg-blue-600 px-6 py-2 rounded flex items-center gap-2 hover:bg-blue-500">
+            <MapPin size={20}/> Reset Checkpoints
+          </button>
+        </div>
+
+        {/* Checkpoint Status */}
+        <div className="mb-6 bg-gray-800 p-4 rounded-lg">
+          <h2 className="text-xl font-bold mb-3 flex items-center justify-center gap-2">
+            <MapPin size={24}/> Navigation Checkpoints
+          </h2>
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+            {checkpoints.map((cp) => (
+              <div 
+                key={cp.id} 
+                className={`p-3 rounded-lg border-2 transition-all ${
+                  cp.reached 
+                    ? 'bg-green-900 border-green-500' 
+                    : 'bg-gray-700 border-gray-500'
+                }`}
+              >
+                <p className="font-bold">{cp.name}</p>
+                <p className="text-xs text-gray-300">
+                  {cp.targetObjects.join(', ')}
+                </p>
+                <p className="text-sm mt-2">
+                  {cp.reached ? '✅ Reached' : '⏳ Pending'}
+                </p>
+              </div>
+            ))}
+          </div>
+          {currentCheckpoint && (
+            <div className="mt-4 bg-green-800 p-3 rounded-lg animate-pulse">
+              <p className="font-bold">🎯 Current: {currentCheckpoint}</p>
+            </div>
+          )}
         </div>
 
         <div className="relative bg-black rounded-xl overflow-hidden aspect-video border-4 border-gray-700">
@@ -272,13 +364,27 @@ const ObjectDetection = () => {
         </div>
 
         {detections.length > 0 && (
-          <div className="mt-6 grid grid-cols-2 md:grid-cols-4 gap-4">
-            {detections.map((d, i) => (
-              <div key={i} className="bg-gray-800 p-3 rounded-lg border-l-4 border-green-500">
-                <p className="font-bold capitalize">{d.class}</p>
-                <p className="text-sm text-gray-400">{estimateDistance(d)}</p>
-              </div>
-            ))}
+          <div className="mt-6">
+            <h3 className="text-lg font-bold mb-3">Detected Objects</h3>
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+              {detections.map((d, i) => {
+                const distance = estimateDistance(d);
+                const colorClass = distance === 'Very Close' ? 'border-red-500' :
+                                 distance === 'Close' ? 'border-orange-500' :
+                                 distance === 'Medium' ? 'border-yellow-500' :
+                                 'border-green-500';
+                
+                return (
+                  <div key={i} className={`bg-gray-800 p-3 rounded-lg border-l-4 ${colorClass}`}>
+                    <p className="font-bold capitalize">{d.class}</p>
+                    <p className="text-sm text-gray-400">{distance}</p>
+                    {distance === 'Very Close' && (
+                      <p className="text-xs text-red-400 mt-1">⚠️ Warning!</p>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
           </div>
         )}
       </div>
