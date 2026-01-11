@@ -252,61 +252,45 @@ export default function IntegratedNavigation() {
       return null;
     }
 
+    // Use the destination from state - this will be updated when voice recognition changes it
     let destinationNode = destination;
+    
+    // Update destinationNode when destination changes (for voice commands)
+    // The navigation logic will re-run when destination changes due to useEffect dependency
     let currentNode: string | null = null;
     let path: string[] | null = null;
     let pathStep = 0;
 
     let lastSpoken = '';
-    let currentAudio: HTMLAudioElement | null = null;
 
-    async function speak(msg: string, { interrupt = false }: { interrupt?: boolean } = {}) {
+    function speak(msg: string, { interrupt = false }: { interrupt?: boolean } = {}) {
       lastSpoken = msg;
       setStatus(msg);
 
+      if (typeof window === 'undefined' || !window.speechSynthesis) {
+        console.warn('SpeechSynthesis not supported');
+        return;
+      }
+
       try {
-        if (interrupt && currentAudio) {
-          currentAudio.pause();
-          currentAudio.currentTime = 0;
-          currentAudio = null;
+        // Cancel any ongoing speech if interrupt is requested
+        if (interrupt) {
+          window.speechSynthesis.cancel();
         }
 
-        const response = await fetch('/api/tts', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ text: msg }),
-        });
+        const utterance = new SpeechSynthesisUtterance(msg);
+        utterance.lang = 'en-US';
+        utterance.rate = 1.0;
+        utterance.pitch = 1.0;
+        utterance.volume = 1.0;
 
-        if (!response.ok) {
-          throw new Error('TTS request failed');
-        }
-
-        const audioBlob = await response.blob();
-        const audioUrl = URL.createObjectURL(audioBlob);
-        const audio = new Audio(audioUrl);
-        currentAudio = audio;
-
-        audio.onended = () => {
-          URL.revokeObjectURL(audioUrl);
-          if (currentAudio === audio) {
-            currentAudio = null;
-          }
+        utterance.onerror = (event) => {
+          console.error('SpeechSynthesis error:', event);
         };
 
-        audio.onerror = () => {
-          console.error('Audio playback error');
-          URL.revokeObjectURL(audioUrl);
-          if (currentAudio === audio) {
-            currentAudio = null;
-          }
-        };
-
-        await audio.play();
+        window.speechSynthesis.speak(utterance);
       } catch (e) {
         console.error('TTS Error:', e);
-        if (currentAudio) {
-          currentAudio = null;
-        }
       }
     }
 
@@ -405,7 +389,8 @@ export default function IntegratedNavigation() {
       const now = Date.now();
       if (now - lastConfirmedAt < movementPromptDelayMs) return;
 
-      if (currentAudio && !currentAudio.paused) return;
+      // Check if speech synthesis is currently speaking
+      if (typeof window !== 'undefined' && window.speechSynthesis && window.speechSynthesis.speaking) return;
 
       segmentPrompted = true;
       speak('Keep moving forward with caution.', { interrupt: false });
@@ -536,12 +521,8 @@ export default function IntegratedNavigation() {
     };
   }, [scriptsLoaded, destination]);
 
-  useEffect(() => {
-    if (scriptsLoaded) {
-      const destEl = document.getElementById('dest') as HTMLSelectElement;
-      if (destEl && destEl.value !== destination) destEl.value = destination;
-    }
-  }, [destination, scriptsLoaded]);
+  // This useEffect is no longer needed - the select is a controlled component
+  // Keeping it for backward compatibility but it should work via React's controlled component pattern
 
   // Voice recognition
   useEffect(() => {
@@ -553,6 +534,41 @@ export default function IntegratedNavigation() {
       console.warn('Speech Recognition not supported in this browser');
       return;
     }
+
+    // Node labels for TTS
+    const nodeLabels: Record<string, string> = {
+      washroom: 'Washroom',
+      elevator: 'Elevator',
+      mainhall: 'Main hall',
+      exitdoor: 'Exit door',
+    };
+
+    // TTS function for voice recognition using browser's built-in SpeechSynthesis
+    const speakViaTTS = (text: string) => {
+      if (typeof window === 'undefined' || !window.speechSynthesis) {
+        console.warn('SpeechSynthesis not supported');
+        return;
+      }
+
+      try {
+        // Cancel any ongoing speech
+        window.speechSynthesis.cancel();
+
+        const utterance = new SpeechSynthesisUtterance(text);
+        utterance.lang = 'en-US';
+        utterance.rate = 1.0;
+        utterance.pitch = 1.0;
+        utterance.volume = 1.0;
+
+        utterance.onerror = (event) => {
+          console.error('SpeechSynthesis error:', event);
+        };
+
+        window.speechSynthesis.speak(utterance);
+      } catch (e) {
+        console.error('TTS Error:', e);
+      }
+    };
 
     let shouldStop = false;
 
@@ -584,7 +600,15 @@ export default function IntegratedNavigation() {
       };
 
       recognition.onresult = (event: any) => {
-        const transcript = event.results[event.results.length - 1][0].transcript.toLowerCase();
+        const rawTranscript = event.results[event.results.length - 1][0].transcript;
+        const transcript = rawTranscript.toLowerCase();
+
+        // Debug: Print speech-to-text results
+        console.log('🎤 Speech-to-Text [Navigation]:', {
+          raw: rawTranscript,
+          processed: transcript,
+          confidence: event.results[event.results.length - 1][0].confidence,
+        });
 
         const keywordMap: Record<string, string> = {
           washroom: 'washroom',
@@ -604,13 +628,22 @@ export default function IntegratedNavigation() {
         for (const [keyword, dest] of Object.entries(keywordMap)) {
           if (transcript.includes(keyword)) {
             matchedDestination = dest;
+            console.log(`✅ Keyword matched: "${keyword}" → ${dest}`);
             break;
           }
         }
 
         if (matchedDestination && matchedDestination !== destination) {
+          const checkpointName = nodeLabels[matchedDestination] || matchedDestination;
+          console.log(`🎯 Destination changed: ${destination} → ${matchedDestination} (${checkpointName})`);
           setDestination(matchedDestination);
-          setStatus(`Destination set to ${matchedDestination} via voice command.`);
+          setStatus(`Destination set to ${checkpointName} via voice command.`);
+          // Speak the matched checkpoint
+          speakViaTTS(`Checkpoint detected: ${checkpointName}. Destination set to ${checkpointName}.`);
+        } else if (matchedDestination) {
+          console.log(`ℹ️ Destination already set to: ${matchedDestination}`);
+        } else {
+          console.log('❌ No destination matched for:', transcript);
         }
       };
 
@@ -657,6 +690,10 @@ export default function IntegratedNavigation() {
           // Ignore errors when stopping
         }
       }
+      // Cancel any ongoing speech synthesis
+      if (typeof window !== 'undefined' && window.speechSynthesis) {
+        window.speechSynthesis.cancel();
+      }
       setIsListening(false);
     };
   }, [scriptsLoaded, destination]);
@@ -679,9 +716,10 @@ export default function IntegratedNavigation() {
           top: 12px;
           padding: 12px;
           border-radius: 12px;
-          background: rgba(0, 0, 0, 0.6);
+          background: rgba(0, 0, 0, 0.75);
           color: white;
-          z-index: 10;
+          z-index: 10000;
+          pointer-events: auto;
         }
 
         #row {
@@ -729,6 +767,11 @@ export default function IntegratedNavigation() {
           position: relative;
           width: 100%;
           height: 100vh;
+          z-index: 1;
+        }
+        
+        a-scene {
+          z-index: 1 !important;
         }
       `,
         }}
